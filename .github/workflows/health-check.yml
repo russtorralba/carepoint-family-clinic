@@ -1,0 +1,71 @@
+name: Health Check
+
+on:
+  schedule:
+    - cron: "17 2,14 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  health-check:
+    name: Website and Supabase health check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SITE_URL: ${{ secrets.SITE_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+    steps:
+      - name: Check website and Supabase REST API
+        shell: bash
+        run: |
+          set -u
+
+          failures=0
+
+          report_failure() {
+            local check_name="$1"
+            local category="$2"
+            local status="$3"
+            printf '%s\n' "${check_name}_CHECK_FAILED category=${category} status=${status}"
+            failures=1
+          }
+
+          if [[ -z "${SITE_URL}" ]]; then
+            report_failure "SITE" "CONFIGURATION_ERROR" "N/A"
+          else
+            site_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 30 "${SITE_URL}")"
+            site_curl_exit=$?
+            if [[ ${site_curl_exit} -ne 0 ]]; then
+              report_failure "SITE" "NETWORK_ERROR" "${site_status:-000}"
+            elif [[ ! "${site_status}" =~ ^[23][0-9]{2}$ ]]; then
+              report_failure "SITE" "HTTP_STATUS" "${site_status}"
+            else
+              printf '%s\n' "SITE_CHECK_PASSED status=${site_status}"
+            fi
+          fi
+
+          if [[ -z "${SUPABASE_URL}" || -z "${SUPABASE_PUBLISHABLE_KEY}" ]]; then
+            report_failure "SUPABASE" "CONFIGURATION_ERROR" "N/A"
+          else
+            supabase_base="${SUPABASE_URL%/}"
+            while [[ "${supabase_base}" == */rest/v1 ]]; do
+              supabase_base="${supabase_base%/rest/v1}"
+            done
+            supabase_endpoint="${supabase_base}/rest/v1/services?select=id&limit=1"
+
+            supabase_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 30 -H "apikey: ${SUPABASE_PUBLISHABLE_KEY}" "${supabase_endpoint}")"
+            supabase_curl_exit=$?
+            if [[ ${supabase_curl_exit} -ne 0 ]]; then
+              report_failure "SUPABASE" "NETWORK_ERROR" "${supabase_status:-000}"
+            elif [[ ! "${supabase_status}" =~ ^2[0-9]{2}$ ]]; then
+              report_failure "SUPABASE" "HTTP_STATUS" "${supabase_status}"
+            else
+              printf '%s\n' "SUPABASE_CHECK_PASSED status=${supabase_status}"
+            fi
+          fi
+
+          if [[ ${failures} -ne 0 ]]; then
+            exit 1
+          fi
